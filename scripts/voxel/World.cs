@@ -1,5 +1,4 @@
 using Godot;
-using Microsoft.VisualBasic;
 using System;
 using System.Collections.Generic;
 
@@ -10,14 +9,13 @@ namespace Voxel
 	{
 		[Export] Camera3D _camera;
 		[Export] Material _material;
+
 		private WorldSettings _worldSettings = new();
+		private Generator _generator = new();
 		private LodOctree _lodOctree;
 		private MeshChunkStorage _meshChunkStorage;
 		private DataChunkStorage _dataChunkStorage;
 		private Editor _editor;
-		private IMesher _mesher = new MarchingCubesMesher();
-		private MeshDataScheduler _meshDataScheduler;
-		private Generator _generator = new();
 
 		public override void _Ready()
 		{
@@ -27,72 +25,49 @@ namespace Voxel
 		public override void _Process(double delta)
 		{
 			if (_camera == null) return;
-			if (_lodOctree == null || _meshChunkStorage == null || 
-				_dataChunkStorage == null || _editor == null || _meshDataScheduler == null) Init();
+			if (_lodOctree == null || _meshChunkStorage == null || _dataChunkStorage == null || _editor == null) Init();
 			
-			_dataChunkStorage.CollectDataChunks(_meshChunkStorage, _editor.ApplyPendingEdits);
+			_dataChunkStorage.CollectScheduled(_meshChunkStorage, _editor.ApplyPendingEdits);
+			_meshChunkStorage.CollectScheduled(this, _material);
+
+			var neededDataChunks = new HashSet<ChunkKey>();
+			var neededMeshChunks = new HashSet<ChunkKey>();
 
 			var viewPoint = ToLocal(_camera.GlobalPosition);
-			_lodOctree.Update((OctreeChunk chunk) => ShouldSubdivide(chunk, viewPoint), (OctreeChunk chunk) => ShouldMerge(chunk, viewPoint));
+			_lodOctree.Update(
+				(OctreeChunk chunk) => LodShouldSubdivide(chunk, viewPoint, neededDataChunks),
+				(OctreeChunk chunk) => LodShouldMerge(chunk, viewPoint));
 
-			var neededMeshChunks = new HashSet<ChunkKey>();
-			var neededDataChunks = new HashSet<ChunkKey>();
-
-			foreach (var leaf in _lodOctree.GetLeaves())
+			foreach (var leaf in _lodOctree.GetLeaves(viewPoint))
 			{
 				neededMeshChunks.Add(leaf.Key);
+				neededDataChunks.Add(leaf.Key);
 
-				var meshChunk = _meshChunkStorage.EnsureMeshChunk(leaf);
 				var hasDataChunk = _dataChunkStorage.TryGetDataChunk(leaf.Key, out var dataChunk);
-				var hasSurface = hasDataChunk && dataChunk.HasSurface;
+				var meshChunk = _meshChunkStorage.EnsureMeshChunk(leaf);
 
 				if (!hasDataChunk) _dataChunkStorage.TrySchedule(leaf.Key, _generator);
-
-				if (hasDataChunk && !hasSurface)
-				{
-					if (meshChunk.State == MeshState.Generating)
-					{
-						_meshDataScheduler.Cancel(meshChunk.Key);
-					}
-					if (meshChunk.Mesh != null)
-					{
-						meshChunk.Mesh.Mesh = null;
-					}
-					if (meshChunk.CollisionShape != null)
-					{
-						meshChunk.CollisionShape.Shape = null;
-					}
-					meshChunk.State = MeshState.Generated;
-				}
-				else if (hasSurface && meshChunk.State == MeshState.Dirty)
-				{
-					if (_meshDataScheduler.Schedule(dataChunk.Key, (float[])dataChunk.Data.Clone(), dataChunk.Size))
-					{
-						meshChunk.State = MeshState.Generating;
-					}
-				}
-
-				if (meshChunk.Mesh != null && meshChunk.State == MeshState.Generated && meshChunk.Mesh.GetParent() != this)
-				{
-					AddChild(meshChunk.Mesh);
-				}
+				if (hasDataChunk && dataChunk.HasSurface && meshChunk.State == MeshState.Dirty) _meshChunkStorage.TrySchedule(dataChunk);
 			}
 
-			for (int i = 0; i < 8; i++) 
-			{
-				if (!_meshDataScheduler.TryGet(out var result)) break;
-
-				var key = result.Item1;
-				var chunkData = result.Item2;
-
-				if (!neededMeshChunks.Contains(key)) continue;
-
-				CreateMesh(key, chunkData);
-			}
-
-			_meshChunkStorage.RemoveUnused(neededMeshChunks, _meshDataScheduler);
+			_meshChunkStorage.RemoveUnused(neededMeshChunks);
 			_dataChunkStorage.RemoveUnused(neededDataChunks, _editor.PendingEdits);
 
+			ProcessEdits();
+		}
+
+		private void Init()
+		{
+			_lodOctree = new LodOctree(_worldSettings);
+			_meshChunkStorage = new MeshChunkStorage(_worldSettings, new MarchingCubesMesher());
+			_dataChunkStorage = new DataChunkStorage(_worldSettings);
+			_editor = new Editor(_worldSettings);
+
+			_generator.AddModifier(new NoiseModifier(ModifierType.Add, new SphereModifier(ModifierType.Add, new Vector3(0.0f, -100000.0f, 0.0f), 100000), 1, 0.0007f, 80.0f, 5));
+		}
+
+		private void ProcessEdits()
+		{
 			Vector3 from = _camera.GlobalPosition + (_camera.GlobalBasis * Vector3.Forward).Normalized() * 2.0f;
 			Vector3 to = from + (_camera.GlobalBasis * Vector3.Forward).Normalized() * 100.0f;
 
@@ -114,64 +89,7 @@ namespace Voxel
 			}
 		}
 
-		private void CreateMesh(ChunkKey key, MeshData meshData)
-		{
-			if (!_meshChunkStorage.TryGetMeshChunk(key, out var meshChunk)) return;
-
-			if (meshData.Vertices.Length < 3 || meshData.Indices.Length < 3)
-			{
-				if (meshChunk.Mesh != null)
-				{
-					meshChunk.Mesh.Mesh = null;
-				}
-				if (meshChunk.CollisionShape != null)
-				{
-					meshChunk.CollisionShape.Shape = null;
-				}
-				meshChunk.State = MeshState.Generated;
-				return;
-			}
-
-			var arrayMesh = new ArrayMesh();
-			var arrays = new Godot.Collections.Array();
-
-			arrays.Resize((int)ArrayMesh.ArrayType.Max);
-			arrays[(int)ArrayMesh.ArrayType.Vertex] = meshData.Vertices;
-			arrays[(int)ArrayMesh.ArrayType.Normal] = meshData.Normals;
-			arrays[(int)ArrayMesh.ArrayType.Index] = meshData.Indices;
-			arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-
-			if (meshChunk.Mesh == null)
-			{
-				meshChunk.Mesh = new MeshInstance3D
-				{
-					Scale = Vector3.One * (1 << meshChunk.Key.Lod),
-					Position = meshChunk.Bounds.Position
-				};					
-			}
-
-			if (meshChunk.CollisionBody == null || meshChunk.CollisionShape == null)
-			{
-				meshChunk.CollisionBody = new StaticBody3D();
-				meshChunk.CollisionShape = new CollisionShape3D();
-
-				meshChunk.CollisionBody.AddChild(meshChunk.CollisionShape);
-				meshChunk.Mesh.AddChild(meshChunk.CollisionBody);
-			}
-
-			meshChunk.Mesh.Mesh = arrayMesh;
-			meshChunk.CollisionShape.Shape = arrayMesh.CreateTrimeshShape();
-
-			if (_material != null) meshChunk.Mesh.SetSurfaceOverrideMaterial(0, _material);
-
-			meshChunk.State = MeshState.Generated;
-			if (meshChunk.Mesh.GetParent() != this)
-			{
-				AddChild(meshChunk.Mesh);
-			}
-		}
-
-		private bool ShouldSubdivide(OctreeChunk chunk, Vector3 viewPoint)
+		private bool LodShouldSubdivide(OctreeChunk chunk, Vector3 viewPoint, HashSet<ChunkKey> neededDataChunks)
 		{
 			if (chunk.Bounds.GetCenter().DistanceTo(viewPoint) > chunk.Bounds.Size.Length()) return false;	
 			if (!_dataChunkStorage.TryGetDataChunk(chunk.Key, out var dataChunk))
@@ -182,13 +100,9 @@ namespace Voxel
 			bool childrenReady = true;
 			for (int i = 0; i < 8; i++)
 			{
-				var offset = new Vector3I(
-					i & 1,
-					(i >> 1) & 1,
-					(i >> 2) & 1
-				);
-				var key = new ChunkKey(chunk.Key.Coord * 2 + offset, chunk.Key.Lod - 1);
+				var key = new ChunkKey(chunk.Key.Coord * 2 + chunk.ChildOffset(i), chunk.Key.Lod - 1);
 
+				neededDataChunks.Add(key);
 				if (!_dataChunkStorage.ContainsDataChunk(key))
 				{
 					_dataChunkStorage.TrySchedule(key, _generator);
@@ -198,18 +112,9 @@ namespace Voxel
 			return dataChunk.HasSurface && childrenReady;
 		}
 
-		private bool ShouldMerge(OctreeChunk chunk, Vector3 viewPoint)
+		private bool LodShouldMerge(OctreeChunk chunk, Vector3 viewPoint)
 		{
 			return chunk.Bounds.GetCenter().DistanceTo(viewPoint) > chunk.Bounds.Size.Length() * 1.5f;	
-		}
-
-		private void Init()
-		{
-			_lodOctree = new LodOctree(_worldSettings);
-			_meshChunkStorage = new MeshChunkStorage(_worldSettings);
-			_dataChunkStorage = new DataChunkStorage(_worldSettings);
-			_editor = new Editor(_worldSettings);
-			_meshDataScheduler = new MeshDataScheduler(_mesher);
 		}
 	}
 }

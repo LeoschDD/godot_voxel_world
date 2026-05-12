@@ -21,10 +21,17 @@ namespace Voxel
             _root.Update(shouldSubdivide, shouldMerge);
         }
 
-        public List<OctreeChunk> GetLeaves()
+        public List<OctreeChunk> GetLeaves(Vector3 viewPoint)
         {
             var leaves = new List<OctreeChunk>();
             _root.CollectLeaves(leaves);
+            leaves.Sort(delegate(OctreeChunk x, OctreeChunk y)
+			{
+				float distanceX = x.Bounds.GetCenter().DistanceSquaredTo(viewPoint);
+				float distanceY = y.Bounds.GetCenter().DistanceSquaredTo(viewPoint);
+
+				return distanceX.CompareTo(distanceY);
+			});
             return leaves;
         }
     }

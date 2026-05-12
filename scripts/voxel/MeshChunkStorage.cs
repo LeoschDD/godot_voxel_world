@@ -7,10 +7,12 @@ namespace Voxel
 	public class MeshChunkStorage
 	{
 		private Dictionary<ChunkKey, MeshChunk> _meshChunks = new();
+		private MeshDataScheduler _meshDataScheduler;
 		private WorldSettings _worldSettings;
 
-		public MeshChunkStorage(WorldSettings worldSettings)
+		public MeshChunkStorage(WorldSettings worldSettings, IMesher mesher)
 		{
+			_meshDataScheduler = new MeshDataScheduler(mesher);
 			_worldSettings = worldSettings;
 		}
 
@@ -27,7 +29,27 @@ namespace Voxel
 			return _meshChunks.TryGetValue(key, out meshChunk);
 		}
 
-		public void RemoveUnused(HashSet<ChunkKey> neededMeshChunks, MeshDataScheduler meshDataScheduler)
+		public bool TrySchedule(DataChunk dataChunk)
+		{
+			if (!_meshChunks.TryGetValue(dataChunk.Key, out var meshChunk)) return false;
+			if (_meshDataScheduler.Schedule(dataChunk.Key, (float[])dataChunk.Data, dataChunk.Size))
+			{
+				meshChunk.State = MeshState.Generating;
+				return true;
+			}
+			return false;
+		}
+
+		public void CollectScheduled(Node meshParent, Material meshMaterial)
+		{
+			for (int i = 0; i < 16; i++)
+			{
+				if (!_meshDataScheduler.TryGet(out var result)) break;
+				CreateMesh(result.Item1, result.Item2, meshParent, meshMaterial);
+			}
+		}
+
+		public void RemoveUnused(HashSet<ChunkKey> neededMeshChunks)
 		{
 			var removableMeshes = new List<ChunkKey>();
 			foreach (var key in _meshChunks.Keys)
@@ -50,7 +72,7 @@ namespace Voxel
 					}
 					if (meshChunk.State == MeshState.Generating) 
 					{
-						meshDataScheduler.Cancel(key);
+						_meshDataScheduler.Cancel(key);
 					}
 					_meshChunks.Remove(key);
 				}
@@ -79,6 +101,55 @@ namespace Voxel
 				if (!_meshChunks.TryGetValue(leaf, out var c) || c.State != MeshState.Generated) return false;
 			}
 			return true;
+		}
+
+
+		private void CreateMesh(ChunkKey key, MeshData meshData, Node meshParent, Material meshMaterial)
+		{
+			if (!_meshChunks.TryGetValue(key, out var meshChunk)) return;
+
+			if (meshData.Vertices.Length < 3 || meshData.Indices.Length < 3)
+			{
+				if (meshChunk.Mesh != null)
+				{
+					meshChunk.Mesh.Mesh = null;
+				}
+				if (meshChunk.CollisionShape != null)
+				{
+					meshChunk.CollisionShape.Shape = null;
+				}
+				meshChunk.State = MeshState.Generated;
+				return;
+			}
+
+			var arrayMesh = new ArrayMesh();
+			var arrays = new Godot.Collections.Array();
+
+			arrays.Resize((int)ArrayMesh.ArrayType.Max);
+			arrays[(int)ArrayMesh.ArrayType.Vertex] = meshData.Vertices;
+			arrays[(int)ArrayMesh.ArrayType.Normal] = meshData.Normals;
+			arrays[(int)ArrayMesh.ArrayType.Index] = meshData.Indices;
+			arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+
+			meshChunk.Mesh = new MeshInstance3D
+			{
+				Scale = Vector3.One * (1 << meshChunk.Key.Lod),
+				Position = meshChunk.Bounds.Position
+			};					
+			
+			meshChunk.CollisionBody = new StaticBody3D();
+			meshChunk.CollisionShape = new CollisionShape3D();
+
+			meshChunk.CollisionBody.AddChild(meshChunk.CollisionShape);
+			meshChunk.Mesh.AddChild(meshChunk.CollisionBody);
+			
+			meshChunk.Mesh.Mesh = arrayMesh;
+			meshChunk.CollisionShape.Shape = arrayMesh.CreateTrimeshShape();
+
+			if (meshMaterial != null) meshChunk.Mesh.SetSurfaceOverrideMaterial(0, meshMaterial);
+
+			meshChunk.State = MeshState.Generated;
+			meshParent.AddChild(meshChunk.Mesh);
 		}
 	}
 }

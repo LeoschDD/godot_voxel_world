@@ -47,7 +47,7 @@ namespace Voxel
             }
         }
 
-        private Vector3I ChildOffset(int index)
+        public Vector3I ChildOffset(int index)
         {
             return new Vector3I(
                 index & 1,

@@ -1,7 +1,6 @@
 using Godot;
 using System;
 using System.Collections.Generic;
-using System.Reflection.Metadata.Ecma335;
 
 namespace Voxel
 {
@@ -39,7 +38,7 @@ namespace Voxel
 			return false;
 		}
 
-		public void CollectDataChunks(MeshChunkStorage meshChunkStorage, Action<DataChunk, MeshChunkStorage> applyPendingEdits)
+		public void CollectScheduled(MeshChunkStorage meshChunkStorage, Action<DataChunk, MeshChunkStorage> applyPendingEdits)
 		{
 			for (int i = 0; i < 16; i++)
 			{

@@ -29,22 +29,32 @@ namespace Voxel
 			return _meshChunks.TryGetValue(key, out meshChunk);
 		}
 
-		public bool TrySchedule(DataChunk dataChunk)
+		public void SyncMeshChunk(DataChunk dataChunk)
 		{
-			if (!_meshChunks.TryGetValue(dataChunk.Key, out var meshChunk)) return false;
-			if (_meshDataScheduler.Schedule(dataChunk.Key, (float[])dataChunk.Data, dataChunk.Size))
+			if (!_meshChunks.TryGetValue(dataChunk.Key, out var meshChunk)) return;
+
+			if (!dataChunk.HasSurface)
+			{
+				if (meshChunk.State == MeshState.Generating) _meshDataScheduler.Cancel(meshChunk.Key);
+				if (meshChunk.Mesh != null) meshChunk.Mesh.Mesh = null;
+				if (meshChunk.CollisionShape != null) meshChunk.CollisionShape.Shape = null;
+				meshChunk.State = MeshState.Generated;
+				return;
+			}
+
+			if (meshChunk.State != MeshState.Dirty) return;
+			if (_meshDataScheduler.Schedule(dataChunk.Key, (float[])dataChunk.Data.Clone(), dataChunk.Size))
 			{
 				meshChunk.State = MeshState.Generating;
-				return true;
 			}
-			return false;
 		}
 
-		public void CollectScheduled(Node meshParent, Material meshMaterial)
+		public void CollectScheduled(Node meshParent, Material meshMaterial, HashSet<ChunkKey> neededMeshChunks)
 		{
 			for (int i = 0; i < 16; i++)
 			{
 				if (!_meshDataScheduler.TryGet(out var result)) break;
+				if (!neededMeshChunks.Contains(result.Item1)) continue;
 				CreateMesh(result.Item1, result.Item2, meshParent, meshMaterial);
 			}
 		}
@@ -131,25 +141,31 @@ namespace Voxel
 			arrays[(int)ArrayMesh.ArrayType.Index] = meshData.Indices;
 			arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
 
-			meshChunk.Mesh = new MeshInstance3D
+			if (meshChunk.Mesh == null)
 			{
-				Scale = Vector3.One * (1 << meshChunk.Key.Lod),
-				Position = meshChunk.Bounds.Position
-			};					
+				meshChunk.Mesh = new MeshInstance3D
+				{
+					Scale = Vector3.One * (1 << meshChunk.Key.Lod),
+					Position = meshChunk.Bounds.Position
+				};						
+			}
 			
-			meshChunk.CollisionBody = new StaticBody3D();
-			meshChunk.CollisionShape = new CollisionShape3D();
+			if (meshChunk.CollisionBody == null)
+			{
+				meshChunk.CollisionBody = new StaticBody3D();
+				meshChunk.CollisionShape = new CollisionShape3D();
 
-			meshChunk.CollisionBody.AddChild(meshChunk.CollisionShape);
-			meshChunk.Mesh.AddChild(meshChunk.CollisionBody);
-			
+				meshChunk.CollisionBody.AddChild(meshChunk.CollisionShape);
+				meshChunk.Mesh.AddChild(meshChunk.CollisionBody);				
+			}
+
 			meshChunk.Mesh.Mesh = arrayMesh;
 			meshChunk.CollisionShape.Shape = arrayMesh.CreateTrimeshShape();
 
 			if (meshMaterial != null) meshChunk.Mesh.SetSurfaceOverrideMaterial(0, meshMaterial);
 
 			meshChunk.State = MeshState.Generated;
-			meshParent.AddChild(meshChunk.Mesh);
+			if (meshChunk.Mesh.GetParent() != meshParent) meshParent.AddChild(meshChunk.Mesh);
 		}
 	}
 }

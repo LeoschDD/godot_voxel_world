@@ -27,12 +27,9 @@ namespace Voxel
 			if (_camera == null) return;
 			if (_lodOctree == null || _meshChunkStorage == null || _dataChunkStorage == null || _editor == null) Init();
 			
-			_dataChunkStorage.CollectScheduled(_meshChunkStorage, _editor.ApplyPendingEdits);
-			_meshChunkStorage.CollectScheduled(this, _material);
-
-			var neededDataChunks = new HashSet<ChunkKey>();
 			var neededMeshChunks = new HashSet<ChunkKey>();
-
+			var neededDataChunks = new HashSet<ChunkKey>();
+			
 			var viewPoint = ToLocal(_camera.GlobalPosition);
 			_lodOctree.Update(
 				(OctreeChunk chunk) => LodShouldSubdivide(chunk, viewPoint, neededDataChunks),
@@ -43,12 +40,14 @@ namespace Voxel
 				neededMeshChunks.Add(leaf.Key);
 				neededDataChunks.Add(leaf.Key);
 
+				_meshChunkStorage.EnsureMeshChunk(leaf);
 				var hasDataChunk = _dataChunkStorage.TryGetDataChunk(leaf.Key, out var dataChunk);
-				var meshChunk = _meshChunkStorage.EnsureMeshChunk(leaf);
-
+				if (hasDataChunk) _meshChunkStorage.SyncMeshChunk(dataChunk);
 				if (!hasDataChunk) _dataChunkStorage.TrySchedule(leaf.Key, _generator);
-				if (hasDataChunk && dataChunk.HasSurface && meshChunk.State == MeshState.Dirty) _meshChunkStorage.TrySchedule(dataChunk);
 			}
+			
+			_meshChunkStorage.CollectScheduled(this, _material, neededMeshChunks);
+			_dataChunkStorage.CollectScheduled(_meshChunkStorage, _editor.ApplyPendingEdits);
 
 			_meshChunkStorage.RemoveUnused(neededMeshChunks);
 			_dataChunkStorage.RemoveUnused(neededDataChunks, _editor.PendingEdits);
